@@ -1,81 +1,81 @@
-const express = require('express');
-const redis = require('redis');
-const axios = require('axios');
+const express = require("express");
+const axios = require("axios");
+const https = require("https");
+const redis = require("./redisClient");
+const cors = require("cors");
 
 const app = express();
-const port = process.env.PORT || 8080;
-
-const redisHost = process.env.REDIS_HOST || 'localhost';
-const redisPort = process.env.REDIS_PORT || 6379;
-const redisExpire = parseInt(process.env.REDIS_EXPIRE_SECONDS) || 60;
-
-const client = redis.createClient({
-    socket: {
-        host: redisHost,
-        port: redisPort
-    }
-});
-
-client.on('error', (err) => {
-    console.error('Redis Client Error', err);
-});
+const port = process.env.PORT || 3000;
 
 async function main() {
-    await client.connect();
+  console.log("Connected to app");
 
-    app.use(express.json());
+  app.use(express.json());
+  app.use(cors());
+  app.post("/chat", async (req, res) => {
+    const { message, conversation_id } = req.body;
+    if (!message) {
+      return res.status(400).send("Missing 'message' parameter.");
+    }
 
-    app.post('/chat', async (req, res) => {
-        const { message, conversation_id } = req.body;
+    const url = "https://omn.mdev.mehes.gov.il/api/v1/templates/chat";
+    const body = {
+      message,
+      workflow_type: "template",
+      conversation_id: conversation_id || "",
+      use_rag: false,
+      document_ids: [],
+    };
 
-        if (!message) {
-            return res.status(400).send("Missing 'message' parameter.");
+    try {
+      const axiosOptions = {
+        headers: {
+          "Content-Type": "application/json",
+          "X-API-KEY": "test-api-key",
+          Accept: "*/*",
+          "Accept-Encoding": "gzip, deflate, br",
+          Connection: "keep-alive",
+          "Cache-Control": "no-cache",
+        },
+      };
+
+      let redis_conversation_id = null;
+      if (!conversation_id) {
+        const response = await axios.post(url, body, axiosOptions);
+
+        await redis.set(
+          `conversation_id_${response.data.conversation_id}`,
+          response.data.conversation_id,
+          {
+            EX: 1800,
+          }
+        );
+        return res.json(response.data);
+      } else {
+        redis_conversation_id = await redis.get(
+          `conversation_id_${conversation_id}`
+        );
+        if (!redis_conversation_id)
+          return res.status(404).send("Conversation ID not found or expired.");
+        const response = await axios.post(url, body, axiosOptions);
+        if (redis_conversation_id !== response.data.conversation_id) {
+          return res.status(404).send("Conversation ID not found or expired.");
         }
+        if (response)
+          return res.status(response.status).send(response.data);
+      }
+    } catch (error) {
+      if (error.response) {
+        return res.status(error.response.status).json(error.response.data);
+      } else {
+        return res.status(500).send("Internal error: " + error.message);
+      }
+    }
+  });
 
-        const url = "https://omn.mdev.mehes.gov.il/api/v1/templates/chat";
-        const body = {
-            message,
-            workflow_type: "template",
-            conversation_id: conversation_id || "",
-            use_rag: false,
-            document_ids: []
-        };
-
-        try {
-            if (!conversation_id) {
-                const response = await axios.post(url, body, {
-                    headers: {
-                        'X-API-KEY': 'test-api-key'
-                    }
-                });
-                const newId = response.data.conversation_id;
-                await client.set(newId, "1", { EX: 3600 }); // 1 hour
-                return res.json(response.data);
-            } else {
-                const exists = await client.get(conversation_id);
-                if (!exists) {
-                    return res.status(404).send("Conversation ID not found or expired.");
-                }
-
-                const response = await axios.post(url, body, {
-                    headers: {
-                        'X-API-KEY': 'test-api-key'
-                    }
-                });
-                return res.json(response.data);
-            }
-        } catch (error) {
-            if (error.response) {
-                return res.status(error.response.status).json(error.response.data);
-            } else {
-                return res.status(500).send("Internal error: " + error.message);
-            }
-        }
-    });
-
-    app.listen(port, () => {
-        console.log(`App running on port ${port}`);
-    });
+  app.listen(port, () => {
+    console.log(`App running on port ${port}`);
+  });
 }
 
 main();
